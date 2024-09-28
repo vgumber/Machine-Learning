@@ -1,0 +1,235 @@
+---
+title: "Movie Recommendation System Project"
+author: "Vijayita Gumber"
+date: "2024-04-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Installation of required packages
+
+```{r}
+# List of packages need to be installed
+packages <- c("ggplot2", "dplyr", "tidyr", "recommenderlab", "data.table", "lubridate")
+
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+```
+```{r}
+movies <- read.csv("/Users/vgumber/Desktop/Data Science/Project/movies.csv", stringsAsFactors = FALSE)
+
+ratings <- fread("/Users/vgumber/Desktop/Data Science/Project/ratings.csv")
+
+```
+
+```{r}
+
+ratings$timestamp <- as.POSIXct(ratings$timestamp, origin="1970-01-01", tz="UTC")
+
+ratings$year <- year(ratings$timestamp)
+
+movies$year <- as.numeric(sub(".*\\((\\d{4})\\)$", "\\1", movies$title))
+
+movies$genres <- strsplit(as.character(movies$genres), "\\|")
+
+```
+```{r}
+print(head(ratings$timestamp))
+print(head(ratings$year))
+print(head(movies$year))
+print(head(movies$genres))
+```
+
+## Data Exploration
+
+
+Count the number of ratings given each year
+```{r}
+ratings$year <- as.POSIXlt(as.POSIXct(ratings$timestamp, origin="1970-01-01"))$year + 1900
+yearly_rating_count <- aggregate(rating ~ year, data=ratings, FUN=length)
+
+plot(yearly_rating_count$year, yearly_rating_count$rating, type="l", 
+     xlab="Year", ylab="Number of Ratings", 
+     main="Yearly Rating Count")
+```
+
+Average Ratings per year
+```{r}
+yearly_average_rating <- aggregate(rating ~ year, data=ratings, FUN=mean)
+ggplot(yearly_average_rating, aes(x=year, y=rating)) +
+  geom_line() +
+  labs(x="Year", y="Average Rating", title="Average Rating Per Year")
+```
+
+No of ratings per user
+```{r}
+user_rating_count <- aggregate(rating ~ userId, data=ratings, FUN=length)
+ggplot(user_rating_count, aes(x=rating)) +
+  geom_histogram(bins=30) +
+  labs(x="Number of Ratings", y="Count of Users", title="User Rating Histogram")
+```
+
+Top 10 Rated Movies
+```{r}
+top_rated_movies <- aggregate(rating ~ movieId, data=ratings, FUN=length)
+
+top_rated_movies <- top_rated_movies[order(-top_rated_movies$rating), ][1:10, ]
+
+top_rated_movies_with_titles <- merge(top_rated_movies, movies, by="movieId")
+
+barplot(top_rated_movies_with_titles$rating, 
+        names.arg = top_rated_movies_with_titles$title,
+        main = "Top 10 Rated Movies",
+        xlab = "Movie Title",
+        ylab = "Rating Count",
+        las = 2,
+        ylim = c(0, max(top_rated_movies_with_titles$rating) * 1.1),  # Adjust ylim for better visualization
+        cex.names = 0.4)  # Adjust the size of the names
+
+par(las=2)
+```
+
+Distribution of Movie Rating
+```{r}
+avg_movie_ratings <- aggregate(rating ~ movieId, data=ratings, FUN=mean)
+
+ggplot(avg_movie_ratings, aes(x=rating)) +
+  geom_histogram(binwidth = 0.1) +
+  labs(x="Average Rating", y="Count of Movies", title="Distribution of Movie Ratings")
+```
+
+
+Ratings Over Time for Top Movie
+```{r}
+top_movie_ratings <- subset(ratings, movieId == top_rated_movies$movieId[1])
+ggplot(top_movie_ratings, aes(x=as.Date(as.POSIXct(timestamp, origin="1970-01-01")), y=rating)) +
+  geom_line(stat="summary", fun.y=mean) +
+  labs(x="Year", y="Average Rating", title="Ratings Over Time for Top Movie")
+
+```
+
+Correlation Between Rating Count and Average Rating
+```{r}
+movie_stats <- merge(avg_movie_ratings, top_rated_movies, by="movieId")
+cor(movie_stats$rating.x, movie_stats$rating.y)
+```
+
+## Working on Model
+```{r}
+rating_data <- dcast(ratings, userId ~ movieId, value.var = "rating", fun.aggregate = mean)
+rating_matrix <- as(rating_data, "realRatingMatrix")
+rating_matrix
+recommender_model <- Recommender(rating_matrix, method="UBCF")
+model_info <- getModel(recommender_model)
+summary(model_info$similarity)
+```
+
+
+```{r}
+sampled_data<- sample(x = c(TRUE, FALSE),
+                      size = nrow(rating_matrix),
+                      replace = TRUE,
+                      prob = c(0.8, 0.2))
+training_data <- rating_matrix[sampled_data, ]
+testing_data <- rating_matrix[!sampled_data, ]
+```
+
+
+```{r}
+recommendation_system <- recommenderRegistry$get_entries(dataType ="realRatingMatrix")
+recommendation_system$IBCF_realRatingMatrix$parameters
+```
+
+
+```{r}
+recommen_model <- Recommender(data = training_data,
+                          method = "IBCF",
+                          parameter = list(k = 30))
+recommen_model
+```
+
+```{r}
+model_info <- getModel(recommen_model)
+
+class(model_info$sim)
+```
+## Evaluation
+
+Evaluation of model using RMSE
+```{r}
+library(recommenderlab)
+
+set.seed(123)  # for reproducibility
+
+users <- sample(c(TRUE, FALSE), nrow(rating_matrix), replace=TRUE, prob=c(0.8, 0.2))
+training_data <- rating_matrix[users, ]
+testing_data <- rating_matrix[!users, ]
+
+model <- Recommender(training_data, method="UBCF")
+
+predictions <- predict(model, testing_data, type="ratings")
+
+actual_ratings <- as(testing_data@data, "matrix")
+
+rmse <- sqrt(mean((predictions@data - actual_ratings)^2, na.rm = TRUE))
+print(paste("RMSE: ", rmse))
+
+
+```
+
+Evaluating the model with personalized recommendations
+```{r}
+# the total no of movies recommended to each user
+top_recommendations <- 10 
+predicted_recommendations <- predict(object = recommen_model,
+                          newdata = testing_data,
+                          n = top_recommendations)
+predicted_recommendations
+
+
+mae <- mean(abs(predictions@data - actual_ratings), na.rm = TRUE)
+print(paste("MAE: ", mae))
+
+
+if (!is.vector(predictions@data)) {
+  predictions_vector <- as.vector(predictions@data)  
+} else {
+  predictions_vector <- predictions@data
+}
+
+if (!is.vector(actual_ratings)) {
+  actual_vector <- as.vector(actual_ratings)  
+} else {
+  actual_vector <- actual_ratings
+}
+
+valid_indices <- !is.na(predictions_vector) & !is.na(actual_vector)
+predictions_filtered <- predictions_vector[valid_indices]
+actual_filtered <- actual_vector[valid_indices]
+
+confusion_matrix <- table(Predicted = predictions_filtered, Actual = actual_filtered)
+
+print(confusion_matrix)
+
+confusion_df <- as.data.frame.table(confusion_matrix)
+colnames(confusion_df) <- c("Predicted", "Actual", "Frequency")
+
+
+confusion_plot <- ggplot(confusion_df, aes(x = Actual, y = Predicted, fill = Frequency)) +
+  geom_tile(color = "white") +  
+  geom_text(aes(label = Frequency), vjust = 1.5, color = "black", size = 5) +  # Add text labels
+  scale_fill_gradient(low = "white", high = "steelblue") +  # Color gradient
+  labs(title = "Confusion Matrix", x = "Actual Label", y = "Predicted Label") +  # Labels and title
+  theme_minimal()  
+
+print(confusion_plot)
+```
+
